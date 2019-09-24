@@ -70,6 +70,29 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 	return nil, ErrNoCompatibleInterpreter
 }
 
+// Proposed broken implementation for EIP2274
+func runPrecompiled(evm *EVM, contract *Contract, input []byte, readOnly bool, vmID uint) ([]byte, error) {
+	if vmID == 0 {
+		if contract.CodeAddr != nil {
+			precompiles := PrecompiledContractsHomestead
+			if evm.ChainConfig().IsByzantium(evm.BlockNumber) {
+				precompiles = PrecompiledContractsByzantium
+			}
+			if p := precompiles[*contract.CodeAddr]; p != nil {
+				return RunPrecompiledContract(p, input, contract)
+			}
+		}
+	}
+
+	// EIP-2274: Here, vmID =/= 0, so we execute a fork's precompiled
+	precompiles := PrecompiledContractsCustomToTheFork
+	if p := precompiles[*contract.CodeAddr]; p != nil {
+		return RunCustomPrecompiledContract(p, input, contract)
+	}
+
+	return nil, ErrNoCompatibleInterpreter
+}
+
 // Context provides the EVM with auxiliary information. Once provided
 // it shouldn't be modified.
 type Context struct {
@@ -244,6 +267,34 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
 	// when we're in homestead this also counts for code storage gas errors.
+	if err != nil {
+		evm.StateDB.RevertToSnapshot(snapshot)
+		if err != errExecutionReverted {
+			contract.UseGas(contract.Gas)
+		}
+	}
+	return ret, contract.Gas, err
+}
+
+// Proposed broken implementation for EIP2274
+func (evm *EVM) PrecompiledCall(caller ContractRef, addr common.Address, input []byte, gas uint64, vmID uint) (ret []byte, leftOverGas uint64, err error) {
+	if evm.vmConfig.NoRecursion && evm.depth > 0 {
+		return nil, gas, nil
+	}
+	if evm.depth > int(params.CallCreateDepth) {
+		return nil, gas, ErrDepth
+	}
+
+	var (
+		to       = AccountRef(addr)
+		snapshot = evm.StateDB.Snapshot()
+	)
+	contract := NewContract(caller, to, new(big.Int), gas)
+	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
+	evm.StateDB.AddBalance(addr, bigZero)
+
+	// EIP-2274: vmID is passed here
+	ret, err = runPrecompiled(evm, contract, input, true, vmID)
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		if err != errExecutionReverted {

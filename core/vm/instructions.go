@@ -777,6 +777,33 @@ func opCall(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory 
 	return ret, nil
 }
 
+// Proposed broken implementation for EIP2274
+func opPrecompiledCall(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
+	interpreter.intPool.put(stack.pop())
+    gas := interpreter.evm.callGasTemp
+
+	// EIP-2274: Pop call parameters, one of which being `vmID`⋅
+	vmID, addr, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+
+	toAddr := common.BigToAddress(addr)
+	args := memory.Get(inOffset.Int64(), inSize.Int64())
+
+	// EIP-2274: We call interpreter.evm.PrecompiledCall() which has an extra argument `vmID`
+	ret, returnGas, err := interpreter.evm.PrecompiledCall(contract, toAddr, args, gas, vmID)
+	if err != nil {
+		stack.push(interpreter.intPool.getZero())
+	} else {
+		stack.push(interpreter.intPool.get().SetUint64(1))
+	}
+	if err == nil || err == errExecutionReverted {
+		memory.Set(retOffset.Uint64(), retSize.Uint64(), ret)
+	}
+	contract.Gas += returnGas
+
+	interpreter.intPool.put(vmID, addr, inOffset, inSize, retOffset, retSize)
+	return ret, nil¬
+}
+
 func opCallCode(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
 	// Pop gas. The actual gas is in interpreter.evm.callGasTemp.
 	interpreter.intPool.put(stack.pop())
